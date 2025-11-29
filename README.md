@@ -1,11 +1,13 @@
 # Fragment-shader-like graphics with Raspberry Pi Pico 2
 
-## Generating a UF2 binary
-Ensure that Rust is up-to-date, target support for `thumbv6m-none-eabi` is provided, and elf2uf2-rs is installed:
+## Building
+Ensure that Rust is up-to-date and that target support for `thumbv8m.main-none-eabihf` is provided:
 ```
 rustup self update
-rustup update stable
+rustup update
 rustup target add thumbv8m.main-none-eabihf
 ```
 
-Execute `cargo run --release` to generate the UF2 binary at `target/thumbv6m-none-eabi/release/rusty-obegraensad.uf2`.
+Furthermore, ensure that `picotool` is in the PATH.
+
+Execute `cargo run --release` to build the project and flash the resulting image onto a connected Raspberry Pi Pico 2 in BOOTSEL mode.
