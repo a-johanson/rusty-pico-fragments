@@ -5,13 +5,18 @@ mod display;
 
 use embedded_hal::digital::StatefulOutputPin;
 use panic_halt as _;
-use rp235x_hal::clocks::init_clocks_and_plls;
 use rp235x_hal::gpio::PinState;
 use rp235x_hal::{self as hal, entry};
-use rp235x_hal::{Clock, pac};
+use rp235x_hal::pac;
 use rp235x_hal::dma::DMAExt;
+use rp235x_hal::clocks::{Clock, ClocksManager, ClockSource, InitError};
+use rp235x_hal::pll::{PLLConfig, common_configs::{PLL_USB_48MHZ}, setup_pll_blocking};
+use rp235x_hal::Sio;
+use rp235x_hal::watchdog::Watchdog;
+use rp235x_hal::xosc::setup_xosc_blocking;
 
-use fugit::RateExtU32;
+
+use fugit::{RateExtU32, HertzU32};
 
 use display::WaveshareST7789Display;
 
@@ -40,33 +45,59 @@ pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 
 #[entry]
 fn main() -> ! {
-    let mut pac = pac::Peripherals::take().unwrap();
+    let mut peripherals = pac::Peripherals::take().unwrap();
     let _core = cortex_m::Peripherals::take().unwrap();
-    let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
-    let sio = hal::Sio::new(pac.SIO);
+    let mut watchdog = Watchdog::new(peripherals.WATCHDOG);
 
     // External high-speed crystal on the Pico 2 board is 12 MHz
-    let external_xtal_freq_hz = 12_000_000u32;
-    let clocks = init_clocks_and_plls(
-        external_xtal_freq_hz,
-        pac.XOSC,
-        pac.CLOCKS,
-        pac.PLL_SYS,
-        pac.PLL_USB,
-        &mut pac.RESETS,
-        &mut watchdog,
-    )
-    .ok()
-    .unwrap();
+    const XOSC_CRYSTAL_FREQ: u32 = 12_000_000; 
 
-    let timer = hal::Timer::new_timer0(pac.TIMER0, &mut pac.RESETS, &clocks);
+    // Enable the xosc
+    let xosc = setup_xosc_blocking(peripherals.XOSC, XOSC_CRYSTAL_FREQ.Hz()).map_err(InitError::XoscErr).unwrap();
+
+    // Start tick in watchdog
+    watchdog.enable_tick_generation((XOSC_CRYSTAL_FREQ / 1_000_000) as u16);
+
+    let mut clocks = ClocksManager::new(peripherals.CLOCKS);
+
+    // Configure PLLs
+    const PLL_SYS_250MHZ: PLLConfig = PLLConfig {
+        vco_freq: HertzU32::MHz(1500),
+        refdiv: 1,
+        post_div1: 3,
+        post_div2: 2,
+    };
+    let pll_sys = setup_pll_blocking(peripherals.PLL_SYS, xosc.operating_frequency().into(), PLL_SYS_250MHZ, &mut clocks, &mut peripherals.RESETS).map_err(InitError::PllError).unwrap();
+    let pll_usb = setup_pll_blocking(peripherals.PLL_USB, xosc.operating_frequency().into(), PLL_USB_48MHZ, &mut clocks, &mut peripherals.RESETS).map_err(InitError::PllError).unwrap();
+
+    // Configure clocks
+    // CLK_REF = XOSC (12MHz) / 1 = 12MHz
+    clocks.reference_clock.configure_clock(&xosc, xosc.get_freq()).map_err(InitError::ClockError).unwrap();
+
+    // CLK SYS = PLL SYS (250MHz) / 1 = 250MHz
+    clocks.system_clock.configure_clock(&pll_sys, pll_sys.get_freq()).map_err(InitError::ClockError).unwrap();
+
+    // CLK USB = PLL USB (48MHz) / 1 = 48MHz
+    clocks.usb_clock.configure_clock(&pll_usb, pll_usb.get_freq()).map_err(InitError::ClockError).unwrap();
+
+    // CLK ADC = PLL USB (48MHZ) / 1 = 48MHz
+    clocks.adc_clock.configure_clock(&pll_usb, pll_usb.get_freq()).map_err(InitError::ClockError).unwrap();
+
+    // CLK HSTX = PLL SYS (250MHz) / 1 = 250MHz
+    clocks.hstx_clock.configure_clock(&pll_sys, pll_sys.get_freq()).map_err(InitError::ClockError).unwrap();
+
+    // CLK PERI = clk_sys. Used as reference clock for Peripherals. No dividers so just select and enable
+    clocks.peripheral_clock.configure_clock(&clocks.system_clock, clocks.system_clock.freq()).map_err(InitError::ClockError).unwrap();
+
+    let timer = hal::Timer::new_timer0(peripherals.TIMER0, &mut peripherals.RESETS, &clocks);
     let mut delay_for_app = timer.clone();
 
+    let sio = Sio::new(peripherals.SIO);
     let pins = hal::gpio::Pins::new(
-        pac.IO_BANK0,
-        pac.PADS_BANK0,
+        peripherals.IO_BANK0,
+        peripherals.PADS_BANK0,
         sio.gpio_bank0,
-        &mut pac.RESETS,
+        &mut peripherals.RESETS,
     );
     
     let lcd_clk = pins.gpio10.into_function::<hal::gpio::FunctionSpi>();
@@ -78,18 +109,18 @@ fn main() -> ! {
     let mut led_pin = pins.gpio25.into_push_pull_output_in_state(PinState::High);
 
     // Configure SPI
-    let spi = hal::spi::Spi::<_, _, _, 8>::new(pac.SPI1, (lcd_din, lcd_clk));
+    let spi = hal::spi::Spi::<_, _, _, 8>::new(peripherals.SPI1, (lcd_din, lcd_clk));
     
     // ST7789 can support up to 62.5 MHz, but start conservatively at 16 MHz
     let spi = spi.init(
-        &mut pac.RESETS,
+        &mut peripherals.RESETS,
         clocks.peripheral_clock.freq(),
-        150u32.MHz(),
+        250u32.MHz(),
         embedded_hal::spi::MODE_0,
     );
     
     // Initialize DMA
-    let dma = pac.DMA.split(&mut pac.RESETS);
+    let dma = peripherals.DMA.split(&mut peripherals.RESETS);
     
     let mut display = WaveshareST7789Display::new(spi, lcd_cs, lcd_dc, lcd_rst, dma.ch0);
 
