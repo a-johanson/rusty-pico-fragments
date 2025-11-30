@@ -420,6 +420,7 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "embedded-hal 1.0.0",
+ "fugit",
  "panic-halt",
  "rp235x-hal",
 ]

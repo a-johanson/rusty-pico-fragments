@@ -10,6 +10,7 @@ cortex-m = "0.7"
 cortex-m-rt = "0.7"
 embedded-hal = "1.0"
 panic-halt = "1.0"
+fugit = "0.3"
 
 rp235x-hal = { version = "0.3", features = [
     "rt",
