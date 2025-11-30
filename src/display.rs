@@ -14,7 +14,7 @@ use rp235x_hal::singleton;
 
 pub const WIDTH: u16 = 240;
 pub const HEIGHT: u16 = 320;
-const BUFFER_SIZE: usize = (WIDTH as usize) * (HEIGHT as usize) * 3;
+pub const BUFFER_SIZE: usize = (WIDTH as usize) * (HEIGHT as usize) * 3;
 
 /// ST7789VW Commands
 #[repr(u8)]

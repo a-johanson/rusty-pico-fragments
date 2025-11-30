@@ -14,16 +14,24 @@ use rp235x_hal::pll::{PLLConfig, common_configs::{PLL_USB_48MHZ}, setup_pll_bloc
 use rp235x_hal::Sio;
 use rp235x_hal::watchdog::Watchdog;
 use rp235x_hal::xosc::setup_xosc_blocking;
+use rp235x_hal::multicore::{Multicore, Stack};
 
 
 use fugit::{RateExtU32, HertzU32};
 
 use display::WaveshareST7789Display;
 
+/// Tell the Boot ROM about our application
+#[unsafe(link_section = ".start_block")]
+#[used]
+pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
+
+
+
 /// Fill a frame buffer with a color gradient
-fn fill_frame_buffer(buffer: &mut [u8], frame_count: u32, width: usize, height: usize) {
-    for y in 0..height {
-        let v = y as f32 / ((height - 1) as f32);
+fn fill_frame_buffer(buffer: &mut [u8], frame_count: u32, width: usize, y_offset: usize, rows: usize) {
+    for y in y_offset..(y_offset + rows) {
+        let v = y as f32 / ((display::HEIGHT - 1) as f32);
         let g = (v * 255.0f32) as u8 & 0xFC;
         let b = (frame_count & 0xFC) as u8;
         for x in 0..width {
@@ -37,10 +45,37 @@ fn fill_frame_buffer(buffer: &mut [u8], frame_count: u32, width: usize, height: 
     }
 }
 
-/// Tell the Boot ROM about our application
-#[unsafe(link_section = ".start_block")]
-#[used]
-pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
+
+static CORE1_STACK: Stack<4096> = Stack::new();
+
+fn core1_task() -> ! {
+    let pac = unsafe { hal::pac::Peripherals::steal() };
+    // let core = unsafe { cortex_m::Peripherals::steal() };
+    let mut sio = Sio::new(pac.SIO);
+
+    loop {
+        let buffer_addr = sio.fifo.read_blocking();
+        let frame_count = sio.fifo.read_blocking();
+
+        let buffer = unsafe {
+            core::slice::from_raw_parts_mut(
+                buffer_addr as *mut u8,
+                display::BUFFER_SIZE,
+            )
+        };
+
+        // Render the bottom half of the screen
+        fill_frame_buffer(
+            buffer,
+            frame_count+100,
+            display::WIDTH as usize,
+            display::HEIGHT as usize / 2,
+            display::HEIGHT as usize / 2,
+        );
+
+        sio.fifo.write_blocking(0x1);
+    }
+}
 
 
 #[entry]
@@ -92,7 +127,7 @@ fn main() -> ! {
     let timer = hal::Timer::new_timer0(peripherals.TIMER0, &mut peripherals.RESETS, &clocks);
     let mut delay_for_app = timer.clone();
 
-    let sio = Sio::new(peripherals.SIO);
+    let mut sio = Sio::new(peripherals.SIO);
     let pins = hal::gpio::Pins::new(
         peripherals.IO_BANK0,
         peripherals.PADS_BANK0,
@@ -107,6 +142,11 @@ fn main() -> ! {
     let lcd_rst = pins.gpio12.into_push_pull_output_in_state(PinState::High);
     let _lcd_bl = pins.gpio13.into_push_pull_output_in_state(PinState::High);
     let mut led_pin = pins.gpio25.into_push_pull_output_in_state(PinState::High);
+
+    let mut mc = Multicore::new(&mut peripherals.PSM, &mut peripherals.PPB, &mut sio.fifo);
+    let cores = mc.cores();
+    let core1 = &mut cores[1];
+    let _test = core1.spawn(CORE1_STACK.take().unwrap(), move || core1_task());
 
     // Configure SPI
     let spi = hal::spi::Spi::<_, _, _, 8>::new(peripherals.SPI1, (lcd_din, lcd_clk));
@@ -132,7 +172,10 @@ fn main() -> ! {
     // Main rendering loop with double buffering
     loop {
         // Fill the buffer we have
-        fill_frame_buffer(buffer, frame_count, display::WIDTH as usize, display::HEIGHT as usize);
+        sio.fifo.write_blocking(buffer.as_mut_ptr() as u32);
+        sio.fifo.write_blocking(frame_count);
+        fill_frame_buffer(buffer, frame_count, display::WIDTH as usize, 0, display::HEIGHT as usize / 2);
+        let _ack = sio.fifo.read_blocking();
         
         // Swap: submit filled buffer for DMA transfer, get the other buffer back
         buffer = display.swap_buffers(&mut delay_for_app, buffer);
